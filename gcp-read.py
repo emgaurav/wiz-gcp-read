@@ -13,6 +13,17 @@ import os
 import signal
 import sys
 import threading
+import time
+import warnings
+import logging
+
+# Suppress harmless httplib2 timeout warnings at multiple levels
+warnings.filterwarnings('ignore', message='.*httplib2.*timeout.*')
+logging.captureWarnings(True)
+logging.getLogger('googleapiclient.http').setLevel(logging.ERROR)
+
+# Suppress the specific httplib2 warning
+os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
 
 # As a single script download, we do not publish a requirements.txt. Autodocument.
 
@@ -33,7 +44,9 @@ version='2.8.3'
 ####
 
 
-DEFAULT_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+# For large-scale deployments (thousands of projects), increase max_workers significantly
+# These are I/O-bound API calls, so high parallelism is safe and recommended
+DEFAULT_MAX_WORKERS = 100
 
 parser = argparse.ArgumentParser(description = 'Count GCP Resources')
 parser.add_argument(
@@ -88,7 +101,7 @@ parser.add_argument(
 parser.add_argument(
     '--max-workers',
     dest = 'max_workers',
-    help = f'Maximum parallel processing requests (default: {DEFAULT_MAX_WORKERS}, range 1 to 255)',
+    help = f'Maximum parallel processing requests (default: {DEFAULT_MAX_WORKERS}, range 1 to 1000)',
     type = int,
     default = DEFAULT_MAX_WORKERS
 )
@@ -111,8 +124,8 @@ args = parser.parse_args()
 if args.max_image_tags < 1 or args.max_image_tags > 1000:
     print(f"ERROR: --max-image-tags {args.max_image_tags} out of range: [1 .. 1000]")
     sys.exit(1)
-if args.max_workers < 1 or args.max_workers > 255:
-    print(f"ERROR: --max-workers {args.max_workers} out of range: [1 .. 255]")
+if args.max_workers < 1 or args.max_workers > 1000:
+    print(f"ERROR: --max-workers {args.max_workers} out of range: [1 .. 1000]")
     sys.exit(1)
 
 ####
@@ -920,6 +933,15 @@ def output_results(projects):
     if errors_log:
         print("\nExceptions occurred.")
         print(f"Review {error_log_file} or rerun with '--debug' to disable parallel processing and exit upon first error.")
+    
+    # Performance tip for large deployments
+    if len(projects) > 100 and args.max_workers < 200:
+        print("\n" + "="*80)
+        print("PERFORMANCE TIP: For large deployments, increase parallelism for faster scans:")
+        print(f"  Current: --max-workers {args.max_workers}")
+        print(f"  Recommended for {len(projects)} projects: --max-workers 200-500")
+        print("  Example: python3 resource-count-gcp-v2.py --all --max-workers 300")
+        print("="*80)
 
 
 def main():
@@ -950,31 +972,50 @@ def main():
             print('')
             projects = [[project_id, project_id]]
 
-    print("\nGetting Billable Resources for each GCP Project ...")
+    print(f"\nGetting Billable Resources for {len(projects)} GCP Projects ...")
+    print(f"Using {args.max_workers} parallel workers for optimal performance\n")
+    
+    start_time = time.time()
+    completed_count = 0
+    progress_lock = threading.Lock()
     
     # Process projects in parallel unless debug mode is enabled
     if args.debug_mode:
         # Sequential processing for debugging
-        for project_id, project_name in projects:
-            print(f"\nScanning {project_id} ...")
+        for idx, (project_id, project_name) in enumerate(projects, 1):
+            print(f"\n[{idx}/{len(projects)}] Scanning {project_id} ...")
             get_gcp_resources(project_id, project_name)
     else:
         # Parallel processing for better performance
-        project_futures = []
+        project_futures = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             for project_id, project_name in projects:
-                print(f"\nQueued {project_id} for scanning ...")
-                project_futures.append(
-                    executor.submit(get_gcp_resources, project_id, project_name)
-                )
+                future = executor.submit(get_gcp_resources, project_id, project_name)
+                project_futures[future] = (project_id, project_name)
             
-            # Wait for all projects to complete
-            for idx, future in enumerate(concurrent.futures.as_completed(project_futures)):
+            # Wait for all projects to complete with progress tracking
+            for future in concurrent.futures.as_completed(project_futures):
+                project_id, project_name = project_futures[future]
                 try:
                     future.result()
-                    print(f"\nCompleted scanning {idx+1}/{len(projects)} projects")
+                    with progress_lock:
+                        completed_count += 1
+                        elapsed = time.time() - start_time
+                        rate = completed_count / elapsed if elapsed > 0 else 0
+                        remaining = (len(projects) - completed_count) / rate if rate > 0 else 0
+                        print(f"✓ [{completed_count}/{len(projects)}] Completed {project_id} | "
+                              f"Rate: {rate:.1f} projects/sec | "
+                              f"Est. remaining: {remaining/60:.1f} min")
                 except Exception as ex:  # pylint: disable=broad-exception-caught
-                    error_print(f"Exception in project scanning: {ex}")
+                    with progress_lock:
+                        completed_count += 1
+                    error_print(f"Exception scanning {project_id}: {ex}")
+    
+    total_time = time.time() - start_time
+    print(f"\n{'='*80}")
+    print(f"Completed scanning {len(projects)} projects in {total_time/60:.1f} minutes")
+    print(f"Average rate: {len(projects)/total_time:.1f} projects/second")
+    print(f"{'='*80}\n")
 
     output_results(projects)
 
