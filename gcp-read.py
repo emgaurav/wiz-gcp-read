@@ -790,13 +790,14 @@ def get_gcp_bigquery_datasets(project_id, project_name):
 # pylint: disable=too-many-branches
 def get_gcp_resources(project_id, project_name):
     """ Get billable resources for the specified Project """
+    print(f"🔍 Scanning project: {project_id} ({project_name})...")
     exceptions = 0
     regions_list = []
     service_list = get_gcp_enabled_services(project_id)
     if 'compute.googleapis.com' in service_list:
         regions_list = get_gcp_regions(project_id=project_id)
     if not service_list:
-        print(f"Skipping GCP Project: {project_id} no services enabled.")
+        print(f"⏭️  Skipping: {project_id} (no services enabled)")
         return
     # If debug mode is disabled (default), run all functions concurrently with multithreading.
     # If debug mode is enabled, run all functions sequentially without multithreading.
@@ -861,6 +862,8 @@ def get_gcp_resources(project_id, project_name):
         for future in concurrent.futures.as_completed(futures):
             if future.exception():
                 exceptions += 1
+    
+    print(f"✅ Completed: {project_id}")
 
 
 def output_results(projects):
@@ -961,8 +964,9 @@ def main():
             print(f"-- {project[1]}")
         print('')
     elif args.input_projects:
-        print(f"Getting GCP Projects from file: {input_file}")
+        print(f"📂 Loading GCP Projects from file: {input_file}")
         projects = get_gcp_projects_from_file()
+        print(f"✅ Loaded {len(projects)} projects from {input_file}")
     else:
         if args.id:
             print(f"Getting GCP Project {args.id}")
@@ -972,8 +976,14 @@ def main():
             print('')
             projects = [[project_id, project_id]]
 
-    print(f"\nGetting Billable Resources for {len(projects)} GCP Projects ...")
-    print(f"Using {args.max_workers} parallel workers for optimal performance\n")
+    print(f"\n{'='*80}")
+    print(f"🚀 STARTING RESOURCE SCAN")
+    print(f"{'='*80}")
+    print(f"Total Projects: {len(projects)}")
+    print(f"Parallel Workers: {args.max_workers}")
+    print(f"Data Mode: {'Enabled' if args.data_mode else 'Disabled'}")
+    print(f"Images Mode: {'Enabled' if args.images_mode else 'Disabled'}")
+    print(f"{'='*80}\n")
     
     start_time = time.time()
     completed_count = 0
@@ -1003,9 +1013,12 @@ def main():
                         elapsed = time.time() - start_time
                         rate = completed_count / elapsed if elapsed > 0 else 0
                         remaining = (len(projects) - completed_count) / rate if rate > 0 else 0
-                        print(f"✓ [{completed_count}/{len(projects)}] Completed {project_id} | "
-                              f"Rate: {rate:.1f} projects/sec | "
-                              f"Est. remaining: {remaining/60:.1f} min")
+                        percentage = (completed_count / len(projects)) * 100
+                        print(f"\n{'='*80}")
+                        print(f"Progress: [{completed_count}/{len(projects)}] {percentage:.1f}% | "
+                              f"Rate: {rate:.1f} proj/sec | "
+                              f"ETA: {remaining/60:.1f} min")
+                        print(f"{'='*80}\n")
                 except Exception as ex:  # pylint: disable=broad-exception-caught
                     with progress_lock:
                         completed_count += 1
